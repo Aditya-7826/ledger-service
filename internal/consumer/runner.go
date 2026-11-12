@@ -238,7 +238,7 @@ func (r *Runner) process(ctx context.Context, rec *kgo.Record) error {
 func (r *Runner) parse(rec *kgo.Record) (events.Header, error) {
 	var h events.Header
 	if err := json.Unmarshal(rec.Value, &h); err != nil {
-		return h, fmt.Errorf("%w: not valid JSON: %v", ErrPoison, err)
+		return h, fmt.Errorf("%w: not valid JSON: %w", ErrPoison, err)
 	}
 	if h.EventID == uuid.Nil {
 		return h, fmt.Errorf("%w: missing event_id", ErrPoison)
