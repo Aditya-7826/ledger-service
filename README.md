@@ -76,6 +76,39 @@ A T-account view of a ₹125.50 transfer from Asha to Ravi (amounts in paise):
 
 Debits always equal credits, so the signed sum of all entries in the ledger is always zero.
 
+## Events: the transactional outbox
+
+Other services need to hear about every transfer. Publishing to a broker from the request handler is not safe: if the process dies after the database commit but before the publish, the event is lost; publish first, and a rollback leaves an event for money that never moved.
+
+So the API never talks to the broker. Inside the transfer transaction it inserts rows into an `outbox` table:
+
+| Event | When | Kafka key | Topic |
+|---|---|---|---|
+| `EntryPosted` | once per entry (two per transfer), carries `account_seq` | account ID | `ledger.entries` |
+| `TransferPosted` | once per transfer | transfer ID | `ledger.transfers` |
+
+Every event carries `event_id`, `event_type`, `schema_version` and `occurred_at`. An event exists exactly when its transfer committed.
+
+The **outbox relay** (`cmd/outbox-relay`) is a separate process that loops:
+
+1. `SELECT ... WHERE published_at IS NULL ORDER BY id LIMIT 500 FOR UPDATE SKIP LOCKED`. The row locks are held until step 3, so several relays can run at once and never pick the same row.
+2. Produce the batch with franz-go's idempotent producer (`acks=all`). The key is the aggregate ID, so all events of one account land in one partition, in order.
+3. Set `published_at` only after the broker has acknowledged every record. If publishing fails, the transaction rolls back, nothing is marked, and the next loop retries with backoff (100 ms doubling to 5 s).
+
+It also creates both topics at startup (3 partitions each), prunes published rows older than 7 days, and exposes the gauge `ledger_outbox_unpublished` (the backlog) and the counter `ledger_outbox_published_total` on `/metrics`.
+
+**Delivery is at-least-once.** If the relay dies after the broker acknowledged but before `published_at` was written, the event is published again after restart. That cannot be avoided: the database and the broker are two systems, and no transaction spans both. Exactly-once *processing* therefore has to come from the consumer, which records each `event_id` it has handled in its own database transaction (Phase 3).
+
+### Optional monitoring
+
+Prometheus and Grafana are in a Compose profile that is off by default, to save RAM (256 MB limit each):
+
+```powershell
+docker compose --profile monitoring up -d      # PowerShell and bash are the same
+```
+
+Prometheus is then on `http://localhost:9090` and Grafana on `http://localhost:3000` (anonymous read-only access, Prometheus already added as a data source).
+
 ## Design decisions
 
 <details>
@@ -204,12 +237,24 @@ The tests run the real HTTP API against a real PostgreSQL 16 started by testcont
 | Validation table | 29 bad requests (zero, negative, float, string, overflow, self-transfer, currency mismatch, unknown or closed account, long memo, malformed UUID, missing headers, oversized body, unknown field, …) each get the right status and code, create no transfer and leave no key behind |
 | Reconcile | a tampered balance is detected |
 | Retry | deadlocks and serialization failures are retried at most 3 times; other errors never |
+| Outbox written atomically | a committed transfer has exactly 3 outbox rows; rejected requests write none |
+| Relay: crash before publish | the publish fails, nothing is marked, and the restarted relay publishes every event exactly once, each account's events in one partition and in `account_seq` order |
+| Relay: crash after publish, before marking | every event is delivered exactly twice (the at-least-once case) |
+| Relay: two instances | two relays draining 600 rows in batches of 20 never publish the same row |
+| Relay: pruning and topics | only rows published more than 7 days ago are deleted; both topics have 3 partitions |
+
+The relay tests run against a real Redpanda container as well as PostgreSQL.
 
 ## Project structure
 
 ```
 cmd/api/             the HTTP API binary
-cmd/                 outbox-relay, consumer-notify, consumer-balances (later phases)
+cmd/outbox-relay/    publishes outbox rows to Redpanda
+cmd/                 consumer-notify, consumer-balances (Phase 3)
+internal/events/     event types, topics, topic creation
+internal/outbox/     the relay and its Kafka publisher
+internal/testutil/   starts the PostgreSQL and Redpanda test containers
+monitoring/          Prometheus and Grafana config for the optional profile
 internal/config/     environment configuration
 internal/store/      connection pool, migrations, retrying transaction helper
 internal/idempotency/  idempotency keys in PostgreSQL, cleanup job
