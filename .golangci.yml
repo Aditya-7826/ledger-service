@@ -9,7 +9,14 @@ linters:
     - unconvert
   settings:
     errcheck:
+      # Closing a response body, file or pool and removing a temp folder are
+      # best-effort cleanup: there is nothing useful to do if they fail.
       exclude-functions:
+        - (io.Closer).Close
+        - (io.ReadCloser).Close
+        - (*os.File).Close
+        - (*database/sql.DB).Close
+        - os.RemoveAll
         - (net/http.ResponseWriter).Write
         - fmt.Fprint
         - fmt.Fprintf

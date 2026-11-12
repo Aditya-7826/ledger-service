@@ -76,7 +76,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any, allowEmpty bool
 	err := dec.Decode(dst)
 	if err == nil {
 		// Exactly one JSON value is allowed.
-		if _, err = dec.Token(); err == io.EOF {
+		if _, err = dec.Token(); errors.Is(err, io.EOF) {
 			return true
 		}
 		if err == nil {

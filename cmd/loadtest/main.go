@@ -99,7 +99,12 @@ func run(scenario, api, duration string, vus, logical int, accounts, outDir stri
 	if _, err := os.Stat(accounts); err != nil {
 		return fmt.Errorf("%s not found: run the seed command first (scripts/dev seed)", accounts)
 	}
-	if res, err := http.Get(api + "/readyz"); err != nil || res.StatusCode != http.StatusOK {
+	ready, err := http.Get(api + "/readyz")
+	if err != nil {
+		return errors.New("the API is not ready: start the stack with scripts/dev up")
+	}
+	_ = ready.Body.Close()
+	if ready.StatusCode != http.StatusOK {
 		return errors.New("the API is not ready: start the stack with scripts/dev up")
 	}
 	config.LoadDotEnv(".env")

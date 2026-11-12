@@ -297,7 +297,7 @@ func TestRandomWorkloadWithDuplicateDeliveryMatchesLedger(t *testing.T) {
 				_, err := svc.Transfer(context.Background(), meta(), ledger.TransferInput{
 					From: ids[from], To: ids[to], AmountMinor: 1 + rand.Int64N(30_000), Currency: "INR"})
 				var le *ledger.Error
-				if err != nil && !(errors.As(err, &le) && le.Code == "insufficient_funds") {
+				if err != nil && (!errors.As(err, &le) || le.Code != "insufficient_funds") {
 					t.Errorf("transfer: %v", err)
 				}
 			}

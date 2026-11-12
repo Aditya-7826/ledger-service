@@ -75,7 +75,7 @@ func RunInTx(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) error) 
 			return err
 		}
 		if attempt == MaxRetries {
-			return fmt.Errorf("%w: %v", ErrBusy, err)
+			return fmt.Errorf("%w: %w", ErrBusy, err)
 		}
 		backoff := time.Duration(10<<attempt)*time.Millisecond + time.Duration(rand.Int64N(int64(10*time.Millisecond)))
 		select {

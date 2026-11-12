@@ -28,7 +28,7 @@ type Notify struct{}
 func (Notify) Handle(ctx context.Context, tx pgx.Tx, h events.Header, rec *kgo.Record) error {
 	var e events.TransferPosted
 	if err := json.Unmarshal(rec.Value, &e); err != nil {
-		return fmt.Errorf("%w: %v", ErrPoison, err)
+		return fmt.Errorf("%w: %w", ErrPoison, err)
 	}
 	if e.TransferID == uuid.Nil || e.FromAccountID == uuid.Nil || e.ToAccountID == uuid.Nil || e.AmountMinor < 1 || len(e.Currency) != 3 {
 		return fmt.Errorf("%w: invalid TransferPosted content", ErrPoison)

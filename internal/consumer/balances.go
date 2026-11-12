@@ -48,7 +48,7 @@ type Balances struct {
 func (b *Balances) Handle(ctx context.Context, tx pgx.Tx, _ events.Header, rec *kgo.Record) error {
 	var e events.EntryPosted
 	if err := json.Unmarshal(rec.Value, &e); err != nil {
-		return fmt.Errorf("%w: %v", ErrPoison, err)
+		return fmt.Errorf("%w: %w", ErrPoison, err)
 	}
 	if e.AccountID == uuid.Nil || e.AccountSeq < 1 || e.AmountMinor < 1 || (e.Direction != "DEBIT" && e.Direction != "CREDIT") {
 		return fmt.Errorf("%w: invalid EntryPosted content", ErrPoison)
