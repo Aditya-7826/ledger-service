@@ -12,7 +12,7 @@
 | 1 | Ledger core: accounts, transfers, deposits, reversals, idempotency keys, reconciliation | Done |
 | 2 | Transactional outbox and relay to Redpanda | Done |
 | 3 | Consumers: balance read model, notifications over SSE, dead-letter topics | Done |
-| 4 | Web dashboard (React + Vite + TypeScript + Tailwind) | Not started |
+| 4 | Web dashboard (React + Vite + TypeScript + Tailwind) | Done |
 | 5 | Seed data and k6 load tests | Not started |
 | 6 | CI and final documentation | Not started |
 
@@ -20,7 +20,7 @@ Performance numbers: **not yet measured** (Phase 5).
 
 ## What runs today
 
-`scripts/dev up` starts six containers, sized for an 8 GB laptop. All ports are bound to `localhost` only.
+`scripts/dev up` starts seven containers, sized for an 8 GB laptop. Then open the dashboard at **http://localhost:8088**. All ports are bound to `localhost` only.
 
 | Container | What it is | Memory limit | Host port |
 |---|---|---|---|
@@ -29,6 +29,7 @@ Performance numbers: **not yet measured** (Phase 5).
 | `ledger-outbox-relay` | Publishes outbox rows to Redpanda | 256 MB | `localhost:9101` (`/metrics`, `/healthz`) |
 | `ledger-consumer-balances` | Builds the balance read model from `EntryPosted` | 256 MB | `localhost:8081` |
 | `ledger-consumer-notify` | Builds notifications from `TransferPosted` and streams them (SSE) | 256 MB | `localhost:8082` |
+| `ledger-web` | The dashboard: static files served by nginx, which also forwards `/v1/...` to the three services | 64 MB | `localhost:8088` |
 | `ledger-redpanda` | Redpanda, single node, dev mode (`--smp 1 --memory 900M --overprovisioned`), Kafka API | 1 GB | `localhost:19092` |
 
 The API applies its database migrations (goose SQL files in `migrations/`) when it starts.
@@ -53,7 +54,9 @@ Every write that moves money needs two headers: `Idempotency-Key` and `X-Client-
 | `POST /v1/transfers/{id}/reverse` | Create a compensating REVERSAL (idempotent) |
 | `GET /v1/reconcile` | Audit the whole ledger (four checks, below) |
 | `GET /healthz`, `GET /readyz` | Liveness, and readiness (database reachable) |
+| `GET /v1/stats` | Dashboard numbers: accounts, transfers and volume today, outbox backlog |
 | `GET /v1/views/balances/{id}` (port 8081) | The balance read model, with `lag_seq` against the ledger |
+| `GET /v1/views/system` (port 8081) | Balance-view lag and the number of messages in the dead-letter topics |
 | `GET /v1/stream/events` (port 8082) | Live notifications as Server-Sent Events |
 
 Lists use keyset pagination (`limit` 1–100, default 50; pass `next_cursor` back as `cursor`). Errors are RFC 7807 `application/problem+json` with a stable `code` and no internals.
@@ -133,6 +136,67 @@ It builds `views.balance_view(account_id, balance_minor, last_seq)` from `EntryP
 Each `TransferPosted` becomes two rows in `views.notifications`: the sender was `DEBITED`, the receiver was `CREDITED`.
 
 `GET /v1/stream/events` streams them as SSE. Each event's `id` is the notification id. A client that reconnects with the `Last-Event-ID` header (browsers send it automatically) gets everything after that id, so nothing is missed across a reconnect. A heartbeat comment is sent every 15 seconds.
+
+## Dashboard
+
+A React + Vite + TypeScript + Tailwind app (`web/`) with a "crystal" frosted-glass theme. In Compose it is served on http://localhost:8088.
+
+![Dashboard](docs/screenshots/dashboard.png)
+
+| Page | What it shows |
+|---|---|
+| **Dashboard** | Accounts, transfers and volume today; a live transfer feed over SSE with a Live / Reconnecting indicator; the reconciliation result with all four checks; outbox backlog and balance-view lag; a chart of the last 30 transfers |
+| **Accounts** | Create an account; the balance list; an account page with its entries (DEBIT / CREDIT and the running `account_seq`), the ledger balance next to the read-model balance, a deposit form, and freeze / unfreeze behind a confirmation dialog |
+| **New transfer** | A form that generates an idempotency key, and a **Send again with the same key** button that shows the replay live: same transfer id, `Idempotent-Replayed: true`, one charge |
+| **Journal** | Every transfer as a T-account (debit left, credit right), with a reverse button behind a confirmation dialog |
+| **System** | Outbox backlog, dead-letter count, balance-view lag, and the latest load-test results read from `results/` (or "not yet measured") |
+
+<details>
+<summary><b>More screenshots</b></summary>
+
+| | |
+|---|---|
+| ![Journal](docs/screenshots/journal.png) | ![Account](docs/screenshots/account-detail.png) |
+| ![New transfer](docs/screenshots/new-transfer.png) | ![Accounts](docs/screenshots/accounts.png) |
+| ![System](docs/screenshots/system.png) | <img src="docs/screenshots/mobile-dashboard.png" alt="Dashboard at 375 px" width="240"> |
+
+The screenshots are captured from the running app by `node scripts/screenshots.mjs` (headless Edge or Chrome, no extra packages).
+</details>
+
+How the UI handles the details that matter:
+
+- **Rupees to paise without floats.** The amount field accepts digits with at most two decimals and converts with integer arithmetic (`BigInt`), so `0.29` is exactly 29 paise. `1e3`, `10.555`, negatives and anything above the maximum are rejected before a request is sent.
+- **Debit and credit never rely on colour.** Every amount carries a `+` or `−` sign and a DEBIT / CREDIT label as well as the coral or teal colour.
+- **Contrast.** Plain cyan `#06B6D4` on white is only about 2.4:1, so it is used for accents and charts; text, links and buttons use the deep accent `#0E7490` (5.4:1) and slate body text.
+- **The live feed reconnects by itself** with backoff (0.5 s doubling to 10 s) and resumes from the last event id it saw, so nothing is missed.
+- **One origin, no CORS.** In development the Vite dev server proxies `/v1/...` to the three services; in Compose nginx does the same.
+- Every view has a loading skeleton, an empty state and an error state; buttons are disabled while a request is in flight; focus rings are visible; dialogs trap focus and close on Esc; `prefers-reduced-motion` turns the animations off; without `backdrop-filter` the cards fall back to nearly solid white; the layout works down to 375 px.
+
+### Work on the UI
+
+**PowerShell**
+
+```powershell
+.\scripts\dev.ps1 up        # the backend must be running
+cd web
+npm install
+npm run dev                 # http://localhost:5173 with hot reload
+npm test                    # Vitest
+npm run lint
+npm run build
+```
+
+**bash**
+
+```bash
+./scripts/dev.sh up         # the backend must be running
+cd web
+npm install
+npm run dev                 # http://localhost:5173 with hot reload
+npm test                    # Vitest
+npm run lint
+npm run build
+```
 
 ### Optional monitoring
 
@@ -286,6 +350,14 @@ The tests run the real HTTP API against a real PostgreSQL 16 started by testcont
 
 The relay and consumer tests run against a real Redpanda container as well as PostgreSQL.
 
+The dashboard has 23 Vitest tests (`cd web`, then `npm test`):
+
+| Test | What it proves |
+|---|---|
+| Rupee → paise parsing | `"10"`, `"10.5"`, `"10.50"`, `"0.01"` convert exactly, including values where floating point is wrong (`0.29`, `1.15`); `"1e3"`, `"10.555"`, negatives, zero, separators and values above the maximum are rejected |
+| Idempotency-key generator | keys match the API's rule, never repeat in 5,000 draws, and the fallback without `crypto.randomUUID` produces valid keys too |
+| SSE reconnect logic | reconnects after an error, resumes from the last event id, backs off 0.5 s → 10 s and resets after a success, ignores a replaced connection, and stops cleanly |
+
 ## Project structure
 
 ```
@@ -304,8 +376,10 @@ internal/idempotency/  idempotency keys in PostgreSQL, cleanup job
 internal/ledger/     accounts, transfers, deposits, reversals, reconciliation
 internal/httpapi/    routes, strict JSON decoding, problem+json errors, tests
 migrations/          SQL migrations (goose)
-scripts/             dev.ps1 and dev.sh
-web/ loadtest/ docs/ results/   empty until their phase is built
+scripts/             dev.ps1, dev.sh, screenshots.mjs
+web/                 the dashboard (React, Vite, TypeScript, Tailwind), nginx config
+docs/screenshots/    screenshots of the dashboard
+loadtest/ results/   empty until Phase 5
 Dockerfile           one image for every Go service
 docker-compose.yml
 ```

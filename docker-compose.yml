@@ -177,6 +177,30 @@ services:
       retries: 20
     restart: unless-stopped
 
+  web:
+    build:
+      context: ./web
+    image: ledger-service/web
+    container_name: ledger-web
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8088}:80"
+    volumes:
+      - ./results:/usr/share/nginx/html/results:ro   # load-test result files shown on the System page
+    depends_on:
+      api:
+        condition: service_healthy
+      consumer-balances:
+        condition: service_healthy
+      consumer-notify:
+        condition: service_healthy
+    mem_limit: 64m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
   # ---- optional monitoring: docker compose --profile monitoring up -d ----
   prometheus:
     profiles: ["monitoring"]

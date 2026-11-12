@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/Aditya-7826/ledger-service/internal/consumer"
@@ -532,6 +533,18 @@ func TestPoisonMessagesGoToDLQAndPartitionKeepsFlowing(t *testing.T) {
 	if string(dlq[0].Value) != "this is not json" {
 		t.Errorf("first DLQ record = %q", dlq[0].Value)
 	}
+	// The system endpoint counts the same four records.
+	adminClient, err := kgo.NewClient(kgo.SeedBrokers(broker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adminClient.Close()
+	recorder := httptest.NewRecorder()
+	consumer.SystemHandler(pool, kadm.NewClient(adminClient), topic+consumer.DLQSuffix)(recorder, httptest.NewRequest(http.MethodGet, "/v1/views/system", nil))
+	var sys consumer.SystemView
+	if err := json.Unmarshal(recorder.Body.Bytes(), &sys); err != nil || recorder.Code != 200 || sys.DLQ.Total != 4 {
+		t.Errorf("system endpoint: %d %s", recorder.Code, recorder.Body.String())
+	}
 	for _, rec := range dlq {
 		reason := ""
 		for _, h := range rec.Headers {
@@ -691,6 +704,18 @@ func TestNotificationStreamResumesWithLastEventID(t *testing.T) {
 	defer closeReplay()
 	if first, _, _ := nextNotifications(t, replay, 1); first[0].ID != 1 {
 		t.Errorf("replay from 0 started at id %d", first[0].ID)
+	}
+
+	// ?recent=2 starts with the two newest notifications; ?last_event_id works like the header.
+	recent, closeRecent := openStream(t, srv.URL+"?recent=2", "")
+	defer closeRecent()
+	if got, _, _ := nextNotifications(t, recent, 2); got[0].ID != missed[0].ID || got[1].ID != missed[1].ID {
+		t.Errorf("recent=2 delivered ids %d, %d", got[0].ID, got[1].ID)
+	}
+	viaQuery, closeQuery := openStream(t, srv.URL+"?last_event_id="+ids[1], "")
+	defer closeQuery()
+	if got, _, _ := nextNotifications(t, viaQuery, 1); got[0].ID != missed[0].ID {
+		t.Errorf("last_event_id query delivered id %d", got[0].ID)
 	}
 
 	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)

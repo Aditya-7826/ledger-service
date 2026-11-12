@@ -112,3 +112,31 @@ func (s *Service) attachEntries(ctx context.Context, list []*Transfer) error {
 	}
 	return rows.Err()
 }
+
+// Stats are the headline numbers shown on the dashboard. "Today" is the
+// current UTC day. Volume counts every transfer type (deposits and reversals
+// included) and is capped at the int64 maximum.
+type Stats struct {
+	Accounts                 int64 `json:"accounts"`
+	TransfersTotal           int64 `json:"transfers_total"`
+	TransfersToday           int64 `json:"transfers_today"`
+	VolumeTodayMinor         int64 `json:"volume_today_minor"`
+	OutboxBacklog            int64 `json:"outbox_backlog"`
+	OldestUnpublishedSeconds int64 `json:"oldest_unpublished_seconds"`
+}
+
+// Stats returns the dashboard numbers.
+func (s *Service) Stats(ctx context.Context) (*Stats, error) {
+	var st Stats
+	err := s.pool.QueryRow(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM accounts WHERE kind = 'USER'),
+			(SELECT COUNT(*) FROM transfers),
+			(SELECT COUNT(*) FROM transfers WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'),
+			(SELECT LEAST(COALESCE(SUM(amount_minor), 0), 9223372036854775807)::bigint FROM transfers
+			  WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'),
+			(SELECT COUNT(*) FROM outbox WHERE published_at IS NULL),
+			(SELECT COALESCE(EXTRACT(EPOCH FROM now() - MIN(created_at)), 0)::bigint FROM outbox WHERE published_at IS NULL)`).
+		Scan(&st.Accounts, &st.TransfersTotal, &st.TransfersToday, &st.VolumeTodayMinor, &st.OutboxBacklog, &st.OldestUnpublishedSeconds)
+	return &st, err
+}

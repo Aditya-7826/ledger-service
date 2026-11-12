@@ -115,7 +115,12 @@ func (s *Stream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	var last int64
-	if raw := r.Header.Get("Last-Event-ID"); raw != "" {
+	raw := r.Header.Get("Last-Event-ID")
+	if raw == "" {
+		// A client that opens a new connection itself cannot set the header; it may pass the id as a query parameter.
+		raw = r.URL.Query().Get("last_event_id")
+	}
+	if raw != "" {
 		n, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || n < 0 {
 			http.Error(w, "Last-Event-ID must be a non-negative integer", http.StatusBadRequest)
@@ -125,6 +130,9 @@ func (s *Stream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else if err := s.Pool.QueryRow(ctx, `SELECT COALESCE(MAX(id), 0) FROM views.notifications`).Scan(&last); err != nil {
 		http.Error(w, "database is not reachable", http.StatusServiceUnavailable)
 		return
+	} else if recent, err := strconv.ParseInt(r.URL.Query().Get("recent"), 10, 64); err == nil && recent > 0 {
+		// ?recent=N starts the stream with the N most recent notifications (at most 100).
+		last = max(last-min(recent, 100), 0)
 	}
 
 	// Subscribe before the first query so nothing committed in between is missed.

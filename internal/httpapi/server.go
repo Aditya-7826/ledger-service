@@ -61,6 +61,7 @@ func NewRouter(svc *ledger.Service, pool *pgxpool.Pool, log *slog.Logger) http.H
 
 		r.Post("/deposits", a.createDeposit)
 		r.Get("/reconcile", a.reconcile)
+		r.Get("/stats", a.stats)
 	})
 	return r
 }

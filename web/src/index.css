@@ -1,0 +1,202 @@
+@import 'tailwindcss';
+
+/* ---- Crystal theme tokens ------------------------------------------------ */
+@theme {
+  --font-sans: 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
+
+  --color-primary: #06b6d4;
+  --color-primary-hover: #0891b2;
+  --color-accent: #7dd3fc;
+  /* Plain cyan on white is only about 2.4:1, so text and icons use the deep accent (5.4:1). */
+  --color-deep: #0e7490;
+  --color-ink: #0f172a;
+  --color-ink-soft: #334155;
+
+  /* Debit: soft coral surface with a darker coral for text (5.9:1 on white). */
+  --color-debit: #b93a2a;
+  --color-debit-soft: #ffe4de;
+  /* Credit: teal (5.5:1 on white). */
+  --color-credit: #0f766e;
+  --color-credit-soft: #ccfbf1;
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: var(--font-sans);
+  color: var(--color-ink);
+  background: linear-gradient(160deg, #ffffff 0%, #f0f9ff 45%, #e0f7fa 100%) fixed;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Large, very soft blobs fixed behind the content. */
+.blob {
+  position: fixed;
+  z-index: -1;
+  border-radius: 9999px;
+  filter: blur(90px);
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* ---- Frosted glass ------------------------------------------------------- */
+.glass {
+  position: relative;
+  /* Fallback when backdrop-filter is unsupported: nearly solid white. */
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 18px;
+  box-shadow:
+    0 8px 32px rgba(14, 116, 144, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+@supports ((backdrop-filter: blur(16px)) or (-webkit-backdrop-filter: blur(16px))) {
+  .glass {
+    background: rgba(255, 255, 255, 0.55);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    backdrop-filter: blur(16px) saturate(140%);
+  }
+}
+
+/* Subtle shimmer that sweeps across an interactive card on hover. */
+.shimmer {
+  overflow: hidden;
+  transition:
+    transform 180ms ease,
+    box-shadow 180ms ease;
+}
+.shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(115deg, transparent 35%, rgba(255, 255, 255, 0.55) 50%, transparent 65%);
+  transform: translateX(-120%);
+  transition: transform 600ms ease;
+  pointer-events: none;
+}
+.shimmer:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    0 12px 36px rgba(14, 116, 144, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+.shimmer:hover::after {
+  transform: translateX(120%);
+}
+
+/* ---- Shared pieces ------------------------------------------------------- */
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 12px;
+  padding: 0.55rem 1rem;
+  font-weight: 600;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  transition:
+    background-color 160ms ease,
+    box-shadow 160ms ease,
+    opacity 160ms ease;
+  cursor: pointer;
+}
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+/* White on the darker cyan is 3.7:1 (large/bold UI text); the deep accent gives 5.4:1 for normal text. */
+.btn-primary {
+  background: var(--color-deep);
+  color: #ffffff;
+  box-shadow: 0 4px 14px rgba(8, 145, 178, 0.35);
+}
+.btn-primary:hover:not(:disabled) {
+  background: #155e75;
+}
+.btn-ghost {
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--color-deep);
+  border: 1px solid rgba(14, 116, 144, 0.25);
+}
+.btn-ghost:hover:not(:disabled) {
+  background: #ffffff;
+}
+.btn-danger {
+  background: var(--color-debit);
+  color: #ffffff;
+}
+.btn-danger:hover:not(:disabled) {
+  background: #9c2f21;
+}
+
+.field {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid rgba(14, 116, 144, 0.25);
+  background: rgba(255, 255, 255, 0.85);
+  padding: 0.55rem 0.75rem;
+  font-size: 0.9rem;
+  color: var(--color-ink);
+  transition: border-color 160ms ease;
+}
+.field:hover {
+  border-color: var(--color-primary-hover);
+}
+.field[aria-invalid='true'] {
+  border-color: var(--color-debit);
+}
+
+.skeleton {
+  border-radius: 10px;
+  background: linear-gradient(90deg, rgba(125, 211, 252, 0.25) 25%, rgba(255, 255, 255, 0.7) 50%, rgba(125, 211, 252, 0.25) 75%);
+  background-size: 200% 100%;
+  animation: skeleton 1.4s ease-in-out infinite;
+}
+@keyframes skeleton {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* Visible focus ring everywhere, for keyboard users. */
+:focus-visible {
+  outline: 3px solid var(--color-deep);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+dialog::backdrop {
+  background: rgba(15, 23, 42, 0.35);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .shimmer:hover {
+    transform: none;
+  }
+  .shimmer::after {
+    display: none;
+  }
+}

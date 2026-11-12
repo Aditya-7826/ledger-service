@@ -10,6 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/Aditya-7826/ledger-service/internal/config"
 	"github.com/Aditya-7826/ledger-service/internal/consumer"
@@ -28,6 +30,12 @@ func main() {
 				Help: "Accounts rebuilt from the ledger after a sequence gap persisted.",
 			}, func() float64 { return float64(handler.Rebuilds.Load()) }))
 			mux.Handle("GET /v1/views/balances/{id}", consumer.BalanceViewHandler(pool, ledger))
+			if admin, err := kgo.NewClient(kgo.SeedBrokers(cfg.KafkaBrokers...)); err == nil {
+				mux.Handle("GET /v1/views/system", consumer.SystemHandler(pool, kadm.NewClient(admin),
+					events.TopicEntries+consumer.DLQSuffix, events.TopicTransfers+consumer.DLQSuffix))
+			} else {
+				log.Error("system endpoint disabled: cannot create the broker client", "error", err)
+			}
 			return &consumer.Runner{Name: consumer.BalancesName, EventType: events.TypeEntryPosted, Handler: handler}
 		},
 	}))

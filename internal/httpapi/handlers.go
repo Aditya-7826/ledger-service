@@ -304,3 +304,12 @@ func (a *api) reconcile(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, rec)
 }
+
+func (a *api) stats(w http.ResponseWriter, r *http.Request) {
+	st, err := a.svc.Stats(r.Context())
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}

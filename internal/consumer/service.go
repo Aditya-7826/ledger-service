@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/twmb/franz-go/pkg/kadm"
 
 	"github.com/Aditya-7826/ledger-service/internal/config"
 	"github.com/Aditya-7826/ledger-service/internal/events"
@@ -153,4 +154,56 @@ func Main(app App) int {
 	_ = srv.Shutdown(shutdownCtx)
 	log.Info("consumer stopped")
 	return 0
+}
+
+// SystemView is the response of GET /v1/views/system: how far the balance
+// view is behind the ledger, and how many messages sit in the dead-letter topics.
+type SystemView struct {
+	BalanceView struct {
+		AccountsBehind int64 `json:"accounts_behind"`
+		EntriesBehind  int64 `json:"entries_behind"`
+	} `json:"balance_view"`
+	DLQ struct {
+		Total  int64            `json:"total"`
+		Topics map[string]int64 `json:"topics"`
+	} `json:"dlq"`
+}
+
+// SystemHandler reports balance-view lag (read from the shared database) and
+// the number of records in the given dead-letter topics (read from the broker).
+func SystemHandler(pool *pgxpool.Pool, admin *kadm.Client, dlqTopics ...string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var out SystemView
+		err := pool.QueryRow(r.Context(), `
+			SELECT COUNT(*), COALESCE(SUM(b.last_seq - COALESCE(v.last_seq, 0)), 0)::bigint
+			FROM account_balances b LEFT JOIN views.balance_view v ON v.account_id = b.account_id
+			WHERE b.last_seq > COALESCE(v.last_seq, 0)`).Scan(&out.BalanceView.AccountsBehind, &out.BalanceView.EntriesBehind)
+		if err != nil {
+			writeProblem(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
+			return
+		}
+		out.DLQ.Topics = map[string]int64{}
+		starts, err1 := admin.ListStartOffsets(r.Context(), dlqTopics...)
+		ends, err2 := admin.ListEndOffsets(r.Context(), dlqTopics...)
+		if err1 != nil || err2 != nil {
+			writeProblem(w, http.StatusBadGateway, "broker_unreachable", "the broker could not be reached")
+			return
+		}
+		for _, topic := range dlqTopics {
+			out.DLQ.Topics[topic] = 0
+		}
+		ends.Each(func(end kadm.ListedOffset) {
+			if end.Err != nil {
+				return
+			}
+			n := end.Offset
+			if start, ok := starts.Lookup(end.Topic, end.Partition); ok && start.Err == nil {
+				n -= start.Offset
+			}
+			out.DLQ.Topics[end.Topic] += n
+			out.DLQ.Total += n
+		})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	}
 }

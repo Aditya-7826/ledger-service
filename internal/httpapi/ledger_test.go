@@ -402,3 +402,26 @@ func TestIdempotencyKeyExpiry(t *testing.T) {
 		t.Errorf("receiver balance = %d, want 30", got)
 	}
 }
+
+func TestStats(t *testing.T) {
+	read := func() ledger.Stats {
+		r := call(t, "GET", "/v1/stats", nil, nil)
+		if r.status != 200 {
+			t.Fatalf("stats: %d %s", r.status, r.body)
+		}
+		var st ledger.Stats
+		r.decode(t, &st)
+		return st
+	}
+	before := read()
+	a, b := funded(t, "stats-a", 1_000), mkAccount(t, "stats-b") // 1 deposit
+	if r := transfer(t, newKey(), a, b, 250); r.status != 201 {
+		t.Fatal(r.status)
+	}
+	after := read()
+	if after.Accounts-before.Accounts != 2 || after.TransfersTotal-before.TransfersTotal != 2 ||
+		after.TransfersToday-before.TransfersToday != 2 || after.VolumeTodayMinor-before.VolumeTodayMinor != 1_250 ||
+		after.OutboxBacklog-before.OutboxBacklog != 6 {
+		t.Errorf("stats did not move as expected:\nbefore %+v\nafter  %+v", before, after)
+	}
+}
