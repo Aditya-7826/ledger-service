@@ -11,7 +11,7 @@
 | 0 | Repo setup: Go module, Docker Compose (PostgreSQL 16 + Redpanda), dev scripts | Done |
 | 1 | Ledger core: accounts, transfers, deposits, reversals, idempotency keys, reconciliation | Done |
 | 2 | Transactional outbox and relay to Redpanda | Done |
-| 3 | Consumers: balance read model, notifications over SSE, dead-letter topics | Not started |
+| 3 | Consumers: balance read model, notifications over SSE, dead-letter topics | Done |
 | 4 | Web dashboard (React + Vite + TypeScript + Tailwind) | Not started |
 | 5 | Seed data and k6 load tests | Not started |
 | 6 | CI and final documentation | Not started |
@@ -20,13 +20,15 @@ Performance numbers: **not yet measured** (Phase 5).
 
 ## What runs today
 
-`scripts/dev up` starts four containers, sized for an 8 GB laptop. All ports are bound to `localhost` only.
+`scripts/dev up` starts six containers, sized for an 8 GB laptop. All ports are bound to `localhost` only.
 
 | Container | What it is | Memory limit | Host port |
 |---|---|---|---|
 | `ledger-api` | The ledger HTTP API (Go, chi, pgx) | 256 MB | `localhost:8080` |
 | `ledger-postgres` | PostgreSQL 16, the single source of truth | 512 MB | `localhost:5434` |
 | `ledger-outbox-relay` | Publishes outbox rows to Redpanda | 256 MB | `localhost:9101` (`/metrics`, `/healthz`) |
+| `ledger-consumer-balances` | Builds the balance read model from `EntryPosted` | 256 MB | `localhost:8081` |
+| `ledger-consumer-notify` | Builds notifications from `TransferPosted` and streams them (SSE) | 256 MB | `localhost:8082` |
 | `ledger-redpanda` | Redpanda, single node, dev mode (`--smp 1 --memory 900M --overprovisioned`), Kafka API | 1 GB | `localhost:19092` |
 
 The API applies its database migrations (goose SQL files in `migrations/`) when it starts.
@@ -51,6 +53,8 @@ Every write that moves money needs two headers: `Idempotency-Key` and `X-Client-
 | `POST /v1/transfers/{id}/reverse` | Create a compensating REVERSAL (idempotent) |
 | `GET /v1/reconcile` | Audit the whole ledger (four checks, below) |
 | `GET /healthz`, `GET /readyz` | Liveness, and readiness (database reachable) |
+| `GET /v1/views/balances/{id}` (port 8081) | The balance read model, with `lag_seq` against the ledger |
+| `GET /v1/stream/events` (port 8082) | Live notifications as Server-Sent Events |
 
 Lists use keyset pagination (`limit` 1–100, default 50; pass `next_cursor` back as `cursor`). Errors are RFC 7807 `application/problem+json` with a stable `code` and no internals.
 
@@ -97,7 +101,38 @@ The **outbox relay** (`cmd/outbox-relay`) is a separate process that loops:
 
 It also creates both topics at startup (3 partitions each), prunes published rows older than 7 days, and exposes the gauge `ledger_outbox_unpublished` (the backlog) and the counter `ledger_outbox_published_total` on `/metrics`.
 
-**Delivery is at-least-once.** If the relay dies after the broker acknowledged but before `published_at` was written, the event is published again after restart. That cannot be avoided: the database and the broker are two systems, and no transaction spans both. Exactly-once *processing* therefore has to come from the consumer, which records each `event_id` it has handled in its own database transaction (Phase 3).
+**Delivery is at-least-once.** If the relay dies after the broker acknowledged but before `published_at` was written, the event is published again after restart. That cannot be avoided: the database and the broker are two systems, and no transaction spans both. Exactly-once *processing* therefore has to come from the consumer, which records each `event_id` it has handled in its own database transaction (next section).
+
+## Consumers
+
+Both consumers follow the same four rules (`internal/consumer`):
+
+- **Consumer group, manual offset commits.** Nothing is auto-committed.
+- **Dedupe in the same transaction as the side effect.** The consumer inserts `(consumer, event_id)` into `views.processed_events` and applies its change in one database transaction. A redelivered event conflicts on that insert and is skipped.
+- **The Kafka offset is committed only after that transaction committed.** If the process dies in between, the event comes again and is skipped as a duplicate.
+- **Poison messages do not block the partition.** A message that is not valid JSON, has an unknown `schema_version`, the wrong `event_type` or invalid content is tried 3 times, then copied to `<topic>.dlq` with the reason in a header, logged, and skipped.
+
+Everything the consumers write lives in a separate `views` schema.
+
+### `consumer-balances`: an eventually consistent read model
+
+It builds `views.balance_view(account_id, balance_minor, last_seq)` from `EntryPosted` events, using each event's `account_seq`:
+
+| Event's `account_seq` | Meaning | What happens |
+|---|---|---|
+| `= last_seq + 1` | the next entry | applied |
+| `≤ last_seq` | duplicate or old | skipped |
+| `> last_seq + 1` | **gap**: an event is missing | retried with backoff; if the gap is still there after `GAP_TIMEOUT_SECONDS` (default 10), the account's view is rebuilt from the ledger's entries endpoint, and that is logged |
+
+`GET /v1/views/balances/{id}` returns the view plus `ledger_last_seq` and `lag_seq` (how many entries the view is behind).
+
+**This view can lag.** It is updated after the transfer committed, through the outbox, the broker and the consumer, so for a moment it may show an older balance. The ledger (`GET /v1/accounts/{id}`) is always the source of truth, and it is what the funds check uses. The view exists to show how a downstream service keeps its own copy correct without ever double-counting.
+
+### `consumer-notify`: notifications over Server-Sent Events
+
+Each `TransferPosted` becomes two rows in `views.notifications`: the sender was `DEBITED`, the receiver was `CREDITED`.
+
+`GET /v1/stream/events` streams them as SSE. Each event's `id` is the notification id. A client that reconnects with the `Last-Event-ID` header (browsers send it automatically) gets everything after that id, so nothing is missed across a reconnect. A heartbeat comment is sent every 15 seconds.
 
 ### Optional monitoring
 
@@ -243,14 +278,22 @@ The tests run the real HTTP API against a real PostgreSQL 16 started by testcont
 | Relay: two instances | two relays draining 600 rows in batches of 20 never publish the same row |
 | Relay: pruning and topics | only rows published more than 7 days ago are deleted; both topics have 3 partitions |
 
-The relay tests run against a real Redpanda container as well as PostgreSQL.
+| Consumers: duplicates | a random concurrent workload is delivered with a duplicated batch; afterwards the balance view equals the ledger for every account and every transfer has exactly two notifications |
+| Consumers: crash before offset commit | a consumer whose offset commits never happen is replaced by another in the same group; everything is redelivered and nothing is applied twice |
+| Consumers: out of order and gaps | a later sequence number waits; the missing one then applies; old ones are skipped; a gap that never closes triggers a logged rebuild from the ledger |
+| Consumers: poison messages | four different poison messages go to the DLQ after 3 attempts each, and the valid events behind them in the same partition are still applied |
+| Notification stream | new events arrive live; idle streams get heartbeats; a reconnect with `Last-Event-ID` receives exactly what was missed |
+
+The relay and consumer tests run against a real Redpanda container as well as PostgreSQL.
 
 ## Project structure
 
 ```
 cmd/api/             the HTTP API binary
 cmd/outbox-relay/    publishes outbox rows to Redpanda
-cmd/                 consumer-notify, consumer-balances (Phase 3)
+cmd/consumer-balances/  builds and serves the balance read model
+cmd/consumer-notify/    builds notifications and serves the SSE stream
+internal/consumer/   consumer runner (dedupe, offsets, DLQ), balance view, notifications
 internal/events/     event types, topics, topic creation
 internal/outbox/     the relay and its Kafka publisher
 internal/testutil/   starts the PostgreSQL and Redpanda test containers

@@ -119,6 +119,64 @@ services:
       retries: 20
     restart: unless-stopped
 
+  consumer-balances:
+    build:
+      context: .
+      args:
+        SERVICE: consumer-balances
+    image: ledger-service/consumer-balances
+    container_name: ledger-consumer-balances
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      KAFKA_BROKERS: redpanda:9092
+      LEDGER_API_URL: http://api:8080
+      GAP_TIMEOUT_SECONDS: ${GAP_TIMEOUT_SECONDS:-10}
+      METRICS_PORT: "9100"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      GOMEMLIMIT: 200MiB
+    ports:
+      - "127.0.0.1:8081:9100"   # /v1/views/balances/{id}, /metrics, /healthz
+    depends_on:
+      api:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9100/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  consumer-notify:
+    build:
+      context: .
+      args:
+        SERVICE: consumer-notify
+    image: ledger-service/consumer-notify
+    container_name: ledger-consumer-notify
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      KAFKA_BROKERS: redpanda:9092
+      METRICS_PORT: "9100"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      GOMEMLIMIT: 200MiB
+    ports:
+      - "127.0.0.1:8082:9100"   # /v1/stream/events (SSE), /metrics, /healthz
+    depends_on:
+      api:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9100/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
   # ---- optional monitoring: docker compose --profile monitoring up -d ----
   prometheus:
     profiles: ["monitoring"]

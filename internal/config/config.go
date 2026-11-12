@@ -19,8 +19,10 @@ type Config struct {
 	IdempotencyTTL   time.Duration
 	DBMaxConns       int32
 	LogLevel         slog.Level
-	KafkaBrokers     []string // KAFKA_BROKERS, comma-separated; empty for services that do not use Kafka
-	MetricsPort      int      // METRICS_PORT, where a background service serves /metrics and /healthz
+	KafkaBrokers     []string      // KAFKA_BROKERS, comma-separated; empty for services that do not use Kafka
+	MetricsPort      int           // METRICS_PORT, where a background service serves /metrics and /healthz
+	LedgerAPIURL     string        // LEDGER_API_URL, where consumers reach the ledger API
+	GapTimeout       time.Duration // GAP_TIMEOUT_SECONDS, how long the balance consumer waits for a missing event
 }
 
 // LoadDotEnv sets variables from a KEY=VALUE file, without overriding ones
@@ -82,6 +84,12 @@ func Load() (Config, error) {
 		return cfg, err
 	}
 	cfg.MetricsPort = int(metricsPort)
+	cfg.LedgerAPIURL = strings.TrimRight(envOr("LEDGER_API_URL", "http://localhost:8080"), "/")
+	gap, err := intEnv("GAP_TIMEOUT_SECONDS", 10, 1, 3600)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.GapTimeout = time.Duration(gap) * time.Second
 	if err := cfg.LogLevel.UnmarshalText([]byte(envOr("LOG_LEVEL", "info"))); err != nil {
 		return cfg, fmt.Errorf("LOG_LEVEL: %w", err)
 	}
