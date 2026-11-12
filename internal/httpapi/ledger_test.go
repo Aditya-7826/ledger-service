@@ -23,6 +23,10 @@ func TestTransferWritesBalancedEntries(t *testing.T) {
 	}
 	var tr ledger.Transfer
 	r.decode(t, &tr)
+	// The same transaction wrote the events: two EntryPosted and one TransferPosted.
+	if n := countRows(t, `SELECT COUNT(*) FROM outbox WHERE payload->>'transfer_id' = $1 AND published_at IS NULL`, tr.ID.String()); n != 3 {
+		t.Errorf("outbox rows for the transfer = %d, want 3", n)
+	}
 	if tr.Type != ledger.TypeTransfer || tr.AmountMinor != 2_500 || len(tr.Entries) != 2 {
 		t.Fatalf("unexpected transfer: %s", r.body)
 	}
@@ -125,6 +129,7 @@ func TestValidationTable(t *testing.T) {
 
 	before := countRows(t, `SELECT COUNT(*) FROM transfers`)
 	keysBefore := countRows(t, `SELECT COUNT(*) FROM idempotency_keys`)
+	outboxBefore := countRows(t, `SELECT COUNT(*) FROM outbox`)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			headers := map[string]string{}
@@ -151,6 +156,9 @@ func TestValidationTable(t *testing.T) {
 	}
 	if after := countRows(t, `SELECT COUNT(*) FROM idempotency_keys`); after != keysBefore {
 		t.Errorf("rejected requests left %d idempotency key(s) behind", after-keysBefore)
+	}
+	if after := countRows(t, `SELECT COUNT(*) FROM outbox`); after != outboxBefore {
+		t.Errorf("rejected requests wrote %d outbox row(s)", after-outboxBefore)
 	}
 }
 

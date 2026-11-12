@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Aditya-7826/ledger-service/internal/events"
 	"github.com/Aditya-7826/ledger-service/internal/idempotency"
 	"github.com/Aditya-7826/ledger-service/internal/store"
 )
@@ -325,22 +326,50 @@ func (s *Service) post(ctx context.Context, tx pgx.Tx, p posting) (*Transfer, er
 	debit := Entry{ID: newID(), TransferID: t.ID, AccountID: p.from, Direction: Debit, AmountMinor: p.amount, AccountSeq: from.lastSeq + 1}
 	credit := Entry{ID: newID(), TransferID: t.ID, AccountID: p.to, Direction: Credit, AmountMinor: p.amount, AccountSeq: to.lastSeq + 1}
 
+	// PostgreSQL keeps microseconds; truncate so the response, the rows and the events agree.
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	t.CreatedAt, debit.CreatedAt, credit.CreatedAt = now, now, now
+
+	// Events go into the outbox in this same transaction: they exist exactly
+	// when the transfer commits. One EntryPosted per entry, one TransferPosted.
+	evDebit := entryEvent(debit, p.currency, now)
+	evCredit := entryEvent(credit, p.currency, now)
+	evTransfer := events.TransferPosted{
+		Header: events.NewHeader(events.TypeTransferPosted, now), TransferID: t.ID, Type: t.Type,
+		FromAccountID: p.from, ToAccountID: p.to, AmountMinor: p.amount, Currency: p.currency, Memo: p.memo,
+		ReversesTransferID: p.reverses,
+	}
+	payloads := make([]string, 3)
+	for i, ev := range []any{evDebit, evCredit, evTransfer} {
+		raw, err := json.Marshal(ev)
+		if err != nil {
+			return nil, err
+		}
+		payloads[i] = string(raw)
+	}
+
 	b := &pgx.Batch{}
 	b.Queue(`INSERT INTO transfers (id, client_id, idempotency_key, from_account_id, to_account_id, amount_minor,
-			currency, memo, type, reverses_transfer_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING created_at`,
-		t.ID, p.meta.ClientID, p.meta.Key, p.from, p.to, p.amount, p.currency, p.memo, p.typ, p.reverses)
+			currency, memo, type, reverses_transfer_id, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		t.ID, p.meta.ClientID, p.meta.Key, p.from, p.to, p.amount, p.currency, p.memo, p.typ, p.reverses, now)
 	b.Queue(`INSERT INTO entries (id, transfer_id, account_id, direction, amount_minor, account_seq, created_at)
-		VALUES ($1, $2, $3, 'DEBIT', $4, $5, now()), ($6, $2, $7, 'CREDIT', $4, $8, now())`,
-		debit.ID, t.ID, debit.AccountID, p.amount, debit.AccountSeq, credit.ID, credit.AccountID, credit.AccountSeq)
-	b.Queue(`UPDATE account_balances SET balance_minor = $2, last_seq = $3, updated_at = now() WHERE account_id = $1`,
-		p.from, from.balance-p.amount, debit.AccountSeq)
-	b.Queue(`UPDATE account_balances SET balance_minor = $2, last_seq = $3, updated_at = now() WHERE account_id = $1`,
-		p.to, to.balance+p.amount, credit.AccountSeq)
+		VALUES ($1, $2, $3, 'DEBIT', $4, $5, $9), ($6, $2, $7, 'CREDIT', $4, $8, $9)`,
+		debit.ID, t.ID, debit.AccountID, p.amount, debit.AccountSeq, credit.ID, credit.AccountID, credit.AccountSeq, now)
+	b.Queue(`UPDATE account_balances SET balance_minor = $2, last_seq = $3, updated_at = $4 WHERE account_id = $1`,
+		p.from, from.balance-p.amount, debit.AccountSeq, now)
+	b.Queue(`UPDATE account_balances SET balance_minor = $2, last_seq = $3, updated_at = $4 WHERE account_id = $1`,
+		p.to, to.balance+p.amount, credit.AccountSeq, now)
+	b.Queue(`INSERT INTO outbox (event_id, aggregate_id, event_type, payload, created_at) VALUES
+			($1, $2, 'EntryPosted', $3::text::jsonb, $10),
+			($4, $5, 'EntryPosted', $6::text::jsonb, $10),
+			($7, $8, 'TransferPosted', $9::text::jsonb, $10)`,
+		evDebit.EventID, debit.AccountID, payloads[0],
+		evCredit.EventID, credit.AccountID, payloads[1],
+		evTransfer.EventID, t.ID, payloads[2], now)
 
 	br := tx.SendBatch(ctx, b)
-	err = br.QueryRow().Scan(&t.CreatedAt)
-	for i := 0; i < 3 && err == nil; i++ {
+	for i := 0; i < b.Len() && err == nil; i++ {
 		_, err = br.Exec()
 	}
 	if cerr := br.Close(); err == nil {
@@ -353,10 +382,16 @@ func (s *Service) post(ctx context.Context, tx pgx.Tx, p posting) (*Transfer, er
 		}
 		return nil, err
 	}
-	t.CreatedAt = t.CreatedAt.UTC()
-	debit.CreatedAt, credit.CreatedAt = t.CreatedAt, t.CreatedAt
 	t.Entries = []Entry{debit, credit}
 	return t, nil
+}
+
+func entryEvent(e Entry, currency string, at time.Time) events.EntryPosted {
+	return events.EntryPosted{
+		Header: events.NewHeader(events.TypeEntryPosted, at), EntryID: e.ID, TransferID: e.TransferID,
+		AccountID: e.AccountID, Direction: e.Direction, AmountMinor: e.AmountMinor, AccountSeq: e.AccountSeq,
+		Currency: currency,
+	}
 }
 
 func alreadyReversed(id uuid.UUID) *Error {

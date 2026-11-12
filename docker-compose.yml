@@ -91,6 +91,63 @@ services:
     stop_grace_period: 15s
     restart: unless-stopped
 
+  outbox-relay:
+    build:
+      context: .
+      args:
+        SERVICE: outbox-relay
+    image: ledger-service/outbox-relay
+    container_name: ledger-outbox-relay
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      KAFKA_BROKERS: redpanda:9092
+      METRICS_PORT: "9100"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      GOMEMLIMIT: 200MiB
+    ports:
+      - "127.0.0.1:9101:9100"   # /metrics and /healthz
+    depends_on:
+      api:
+        condition: service_healthy   # the API applies the migrations
+      redpanda:
+        condition: service_healthy
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9100/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # ---- optional monitoring: docker compose --profile monitoring up -d ----
+  prometheus:
+    profiles: ["monitoring"]
+    image: prom/prometheus:v2.55.1
+    container_name: ledger-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=1d
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    mem_limit: 256m
+
+  grafana:
+    profiles: ["monitoring"]
+    image: grafana/grafana-oss:11.3.0
+    container_name: ledger-grafana
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./monitoring/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+    mem_limit: 256m
+
 volumes:
   pgdata:
   redpanda:

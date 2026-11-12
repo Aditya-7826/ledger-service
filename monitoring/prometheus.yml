@@ -1,0 +1,8 @@
+# Used only by the optional "monitoring" Compose profile.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: outbox-relay
+    static_configs:
+      - targets: ["outbox-relay:9100"]

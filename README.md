@@ -10,7 +10,7 @@
 |---|---|---|
 | 0 | Repo setup: Go module, Docker Compose (PostgreSQL 16 + Redpanda), dev scripts | Done |
 | 1 | Ledger core: accounts, transfers, deposits, reversals, idempotency keys, reconciliation | Done |
-| 2 | Transactional outbox and relay to Redpanda | Not started |
+| 2 | Transactional outbox and relay to Redpanda | Done |
 | 3 | Consumers: balance read model, notifications over SSE, dead-letter topics | Not started |
 | 4 | Web dashboard (React + Vite + TypeScript + Tailwind) | Not started |
 | 5 | Seed data and k6 load tests | Not started |
@@ -20,13 +20,14 @@ Performance numbers: **not yet measured** (Phase 5).
 
 ## What runs today
 
-`scripts/dev up` starts three containers, sized for an 8 GB laptop. All ports are bound to `localhost` only.
+`scripts/dev up` starts four containers, sized for an 8 GB laptop. All ports are bound to `localhost` only.
 
 | Container | What it is | Memory limit | Host port |
 |---|---|---|---|
 | `ledger-api` | The ledger HTTP API (Go, chi, pgx) | 256 MB | `localhost:8080` |
 | `ledger-postgres` | PostgreSQL 16, the single source of truth | 512 MB | `localhost:5434` |
-| `ledger-redpanda` | Redpanda, single node, dev mode (`--smp 1 --memory 900M --overprovisioned`). Not used by any code until Phase 2. | 1 GB | `localhost:19092` |
+| `ledger-outbox-relay` | Publishes outbox rows to Redpanda | 256 MB | `localhost:9101` (`/metrics`, `/healthz`) |
+| `ledger-redpanda` | Redpanda, single node, dev mode (`--smp 1 --memory 900M --overprovisioned`), Kafka API | 1 GB | `localhost:19092` |
 
 The API applies its database migrations (goose SQL files in `migrations/`) when it starts.
 
@@ -60,7 +61,7 @@ Lists use keyset pagination (`limit` 1–100, default 50; pass `next_cursor` bac
 1. **Claim the idempotency key** with `INSERT ... ON CONFLICT DO NOTHING`. A concurrent request with the same key waits on the primary-key index until the first one commits or rolls back. If the key already has a stored response and the request hash (SHA-256 of the canonical request) matches, that response is replayed with the header `Idempotent-Replayed: true`. If the hash differs, the answer is `422 idempotency_key_reused`.
 2. **Lock both accounts** with `SELECT ... FOR UPDATE`, always in ascending UUID order, so A→B and B→A can never deadlock.
 3. **Re-validate under the lock**: both accounts exist and are ACTIVE, currencies match each other and the request, the sender has enough money, and the new balances fit in `int64`. Only the SYSTEM account may go below zero; that is how deposits enter the ledger.
-4. **Write** the transfer, one DEBIT entry and one CREDIT entry (each with the account's next `account_seq`), and update both rows of the `account_balances` projection.
+4. **Write** the transfer, one DEBIT entry and one CREDIT entry (each with the account's next `account_seq`), update both rows of the `account_balances` projection, and insert three events into the `outbox` table (below).
 5. **Store the response** on the idempotency key and commit.
 
 If PostgreSQL reports a deadlock (`40P01`) or serialization failure (`40001`), the transaction is retried up to 3 times with jittered backoff. Validation and business errors are never retried.

@@ -14,14 +14,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/modules/postgres"
-
 	"github.com/Aditya-7826/ledger-service/internal/httpapi"
 	"github.com/Aditya-7826/ledger-service/internal/ledger"
 	"github.com/Aditya-7826/ledger-service/internal/store"
+	"github.com/Aditya-7826/ledger-service/internal/testutil"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // One PostgreSQL container and one API server are shared by every test in
@@ -41,18 +39,10 @@ func TestMain(m *testing.M) { os.Exit(runMain(m)) }
 
 func runMain(m *testing.M) int {
 	ctx := context.Background()
-	pg, err := postgres.Run(ctx, "postgres:16-alpine",
-		postgres.WithDatabase("ledger"), postgres.WithUsername("ledger"), postgres.WithPassword("test"),
-		postgres.BasicWaitStrategies())
+	url, stop, err := testutil.StartPostgres(ctx)
+	defer stop()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "start postgres container:", err)
-		return 1
-	}
-	defer func() { _ = testcontainers.TerminateContainer(pg) }()
-
-	url, err := pg.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	if err := store.Migrate(ctx, url); err != nil {

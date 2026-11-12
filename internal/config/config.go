@@ -19,6 +19,8 @@ type Config struct {
 	IdempotencyTTL   time.Duration
 	DBMaxConns       int32
 	LogLevel         slog.Level
+	KafkaBrokers     []string // KAFKA_BROKERS, comma-separated; empty for services that do not use Kafka
+	MetricsPort      int      // METRICS_PORT, where a background service serves /metrics and /healthz
 }
 
 // LoadDotEnv sets variables from a KEY=VALUE file, without overriding ones
@@ -70,6 +72,16 @@ func Load() (Config, error) {
 		return cfg, err
 	}
 	cfg.DBMaxConns = int32(conns)
+	for _, b := range strings.Split(os.Getenv("KAFKA_BROKERS"), ",") {
+		if b = strings.TrimSpace(b); b != "" {
+			cfg.KafkaBrokers = append(cfg.KafkaBrokers, b)
+		}
+	}
+	metricsPort, err := intEnv("METRICS_PORT", 9100, 1, 65535)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.MetricsPort = int(metricsPort)
 	if err := cfg.LogLevel.UnmarshalText([]byte(envOr("LOG_LEVEL", "info"))); err != nil {
 		return cfg, fmt.Errorf("LOG_LEVEL: %w", err)
 	}
