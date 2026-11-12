@@ -61,6 +61,36 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  api:
+    build:
+      context: .
+      args:
+        SERVICE: api
+    image: ledger-service/api
+    container_name: ledger-api
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      API_PORT: "8080"
+      DB_MAX_CONNS: ${DB_MAX_CONNS:-20}
+      MAX_TRANSFER_MINOR: ${MAX_TRANSFER_MINOR:-100000000000}
+      IDEMPOTENCY_TTL_HOURS: ${IDEMPOTENCY_TTL_HOURS:-24}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Keep the Go heap comfortably inside the 256 MB container limit.
+      GOMEMLIMIT: 200MiB
+    ports:
+      - "127.0.0.1:${API_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/readyz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    stop_grace_period: 15s
+    restart: unless-stopped
+
 volumes:
   pgdata:
   redpanda:

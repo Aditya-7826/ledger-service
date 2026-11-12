@@ -14,7 +14,7 @@ function Assert-EnvFile {
 switch ($Command) {
     "up" {
         Assert-EnvFile
-        docker compose up -d --wait
+        docker compose up -d --wait --build
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         docker compose ps
     }
@@ -30,7 +30,7 @@ switch ($Command) {
     "reset" {
         Assert-EnvFile
         docker compose down -v
-        docker compose up -d --wait
+        docker compose up -d --wait --build
         exit $LASTEXITCODE
     }
     "seed" {

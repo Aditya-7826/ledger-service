@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+.claude
+web
+docs
+results
+loadtest
+bin
+*.md

@@ -14,7 +14,7 @@ require_env() {
 case "${1:-help}" in
   up)
     require_env
-    docker compose up -d --wait
+    docker compose up -d --wait --build
     docker compose ps
     ;;
   down)
@@ -27,7 +27,7 @@ case "${1:-help}" in
   reset)
     require_env
     docker compose down -v
-    docker compose up -d --wait
+    docker compose up -d --wait --build
     ;;
   seed)
     echo "seed is not built yet (Phase 5). See 'Project status' in the README."

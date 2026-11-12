@@ -9,37 +9,134 @@
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Repo setup: Go module, Docker Compose (PostgreSQL 16 + Redpanda), dev scripts | Done |
-| 1 | Ledger core: accounts, transfers, deposits, reversals, idempotency keys, reconciliation | Not started |
+| 1 | Ledger core: accounts, transfers, deposits, reversals, idempotency keys, reconciliation | Done |
 | 2 | Transactional outbox and relay to Redpanda | Not started |
 | 3 | Consumers: balance read model, notifications over SSE, dead-letter topics | Not started |
 | 4 | Web dashboard (React + Vite + TypeScript + Tailwind) | Not started |
 | 5 | Seed data and k6 load tests | Not started |
 | 6 | CI and final documentation | Not started |
 
-Performance and correctness numbers: **not yet measured**.
+Performance numbers: **not yet measured** (Phase 5).
 
 ## What runs today
 
-Phase 0 gives a local infrastructure stack sized for an 8 GB laptop:
+`scripts/dev up` starts three containers, sized for an 8 GB laptop. All ports are bound to `localhost` only.
 
-| Container | Image | Memory limit | Host port |
+| Container | What it is | Memory limit | Host port |
 |---|---|---|---|
-| `ledger-postgres` | `postgres:16-alpine` | 512 MB | `localhost:5434` |
-| `ledger-redpanda` | `redpandadata/redpanda` (single node, dev mode, `--smp 1 --memory 900M --overprovisioned`) | 1 GB | `localhost:19092` (Kafka API) |
+| `ledger-api` | The ledger HTTP API (Go, chi, pgx) | 256 MB | `localhost:8080` |
+| `ledger-postgres` | PostgreSQL 16, the single source of truth | 512 MB | `localhost:5434` |
+| `ledger-redpanda` | Redpanda, single node, dev mode (`--smp 1 --memory 900M --overprovisioned`). Not used by any code until Phase 2. | 1 GB | `localhost:19092` |
 
-Both have health checks, and both ports are bound to `localhost` only.
+The API applies its database migrations (goose SQL files in `migrations/`) when it starts.
+
+## API
+
+Money is always an integer number of minor units (paise): `BIGINT` in PostgreSQL, `int64` in Go, a JSON integer on the wire. `10.5`, `"100"` and `1e3` are rejected.
+
+Every write that moves money needs two headers: `Idempotency-Key` and `X-Client-Id` (each 1–64 characters of `A-Z a-z 0-9 _ -`).
+
+| Method and path | What it does |
+|---|---|
+| `POST /v1/accounts` | Create an account (`name`, `currency`) |
+| `GET /v1/accounts?cursor=&limit=` | List accounts with balances |
+| `GET /v1/accounts/{id}` | One account with its balance |
+| `GET /v1/accounts/{id}/entries?cursor=&limit=` | The account's entries, newest first |
+| `POST /v1/accounts/{id}/freeze`, `/unfreeze` | Block or unblock an account |
+| `POST /v1/deposits` | Add money to an account from the SYSTEM account (idempotent) |
+| `POST /v1/transfers` | Move money between two accounts (idempotent) |
+| `GET /v1/transfers?cursor=&limit=` | List transfers with their entries, newest first |
+| `GET /v1/transfers/{id}` | One transfer with its DEBIT and CREDIT entry |
+| `POST /v1/transfers/{id}/reverse` | Create a compensating REVERSAL (idempotent) |
+| `GET /v1/reconcile` | Audit the whole ledger (four checks, below) |
+| `GET /healthz`, `GET /readyz` | Liveness, and readiness (database reachable) |
+
+Lists use keyset pagination (`limit` 1–100, default 50; pass `next_cursor` back as `cursor`). Errors are RFC 7807 `application/problem+json` with a stable `code` and no internals.
+
+## How a transfer works
+
+`POST /v1/transfers` validates the request before touching the database (strict JSON with no unknown fields, integer amount within `MAX_TRANSFER_MINOR`, two different valid UUIDs, 3-letter currency, memo of at most 280 characters, body of at most 16 KB). Then **one database transaction** does everything else:
+
+1. **Claim the idempotency key** with `INSERT ... ON CONFLICT DO NOTHING`. A concurrent request with the same key waits on the primary-key index until the first one commits or rolls back. If the key already has a stored response and the request hash (SHA-256 of the canonical request) matches, that response is replayed with the header `Idempotent-Replayed: true`. If the hash differs, the answer is `422 idempotency_key_reused`.
+2. **Lock both accounts** with `SELECT ... FOR UPDATE`, always in ascending UUID order, so A→B and B→A can never deadlock.
+3. **Re-validate under the lock**: both accounts exist and are ACTIVE, currencies match each other and the request, the sender has enough money, and the new balances fit in `int64`. Only the SYSTEM account may go below zero; that is how deposits enter the ledger.
+4. **Write** the transfer, one DEBIT entry and one CREDIT entry (each with the account's next `account_seq`), and update both rows of the `account_balances` projection.
+5. **Store the response** on the idempotency key and commit.
+
+If PostgreSQL reports a deadlock (`40P01`) or serialization failure (`40001`), the transaction is retried up to 3 times with jittered backoff. Validation and business errors are never retried.
+
+A T-account view of a ₹125.50 transfer from Asha to Ravi (amounts in paise):
+
+```
+        Asha                      Ravi
+  DEBIT  | CREDIT           DEBIT  | CREDIT
+  12550  |                         | 12550
+```
+
+Debits always equal credits, so the signed sum of all entries in the ledger is always zero.
+
+## Design decisions
+
+<details>
+<summary><b>Idempotency keys live in PostgreSQL, not Redis</b></summary>
+
+The key is written in the same transaction as the ledger entries. With a cache in front, "check the key" and "write the money" would be two systems, and a crash between them either charges twice (key lost, money written) or loses the request (key written, money not). One transaction in one database cannot end up half done.
+</details>
+
+<details>
+<summary><b>A business rejection does not use up the idempotency key</b></summary>
+
+Insufficient funds, a frozen account and similar rejections return a 4xx and roll back the whole transaction, including the key. A client that retries the same key after a deposit arrives gets a real attempt, not a replay of the old rejection. The trade-off: a rejection is not "sticky", so two retries of a rejected request can give different answers if the account changed in between. For a ledger that is the more useful behaviour, because only successful money movement must be exactly-once.
+</details>
+
+<details>
+<summary><b>Replays are byte-identical</b></summary>
+
+The response is stored as `jsonb`, and both the first response and every replay are sent exactly as PostgreSQL returns that column. A replay can therefore never differ from the original, even in whitespace or key order.
+</details>
+
+<details>
+<summary><b>Balances are a projection; entries are the truth</b></summary>
+
+`entries` is append-only: a trigger rejects `UPDATE`, `DELETE` and `TRUNCATE`. `account_balances` is updated in the same transaction and exists only so that reads and the funds check are fast. `GET /v1/reconcile` proves the two agree.
+</details>
+
+<details>
+<summary><b>Freeze takes the same lock as a transfer</b></summary>
+
+Freezing locks the account row a transfer locks. An in-flight transfer either commits before the freeze, or sees `FROZEN` afterwards and gets `403 account_frozen`. There is no window where a transfer slips through after the freeze has returned.
+</details>
+
+<details>
+<summary><b>Other choices</b></summary>
+
+- **Reversals** are new compensating transfers, never edits. A unique constraint on `reverses_transfer_id` means a transfer can be reversed only once, and a reversal cannot itself be reversed. If the original receiver no longer has the money, the answer is `409 insufficient_funds`.
+- **Keyset pagination**: transfer and entry lists page by an indexed key (`id`, `account_seq`), so page 1,000 costs the same as page 1.
+- **Expired keys**: a background job deletes idempotency keys past their TTL (24 h by default) in batches of 1,000. After that, the key counts as new.
+- **Graceful shutdown**: on SIGTERM or Ctrl+C the API finishes in-flight requests for up to 10 seconds.
+</details>
+
+## Reconciliation
+
+`GET /v1/reconcile` runs four checks on one consistent snapshot and reports each one:
+
+1. the signed sum of all entries is zero;
+2. every `account_balances` row equals the sum and last sequence number of its entries;
+3. every transfer has exactly one DEBIT and one CREDIT of the transfer's amount;
+4. every account's `account_seq` runs 1, 2, 3 … with no gaps.
 
 ## Run it
 
-Prerequisites: Docker Desktop (or Docker Engine with the Compose plugin) and Git.
+Prerequisites: Docker Desktop (or Docker Engine with the Compose plugin), Git, and Go 1.26 or newer to run the tests.
 
 **PowerShell**
 
 ```powershell
 git clone https://github.com/Aditya-7826/ledger-service.git
 cd ledger-service
-Copy-Item .env.example .env      # then change POSTGRES_PASSWORD in .env
-.\scripts\dev.ps1 up             # start Postgres + Redpanda, wait until healthy
+Copy-Item .env.example .env      # then change POSTGRES_PASSWORD in .env (both places)
+.\scripts\dev.ps1 up             # build the API, start everything, wait until healthy
+.\scripts\dev.ps1 test           # run the Go tests (needs Docker running)
 .\scripts\dev.ps1 down           # stop (data is kept)
 .\scripts\dev.ps1 reset          # stop, delete data, start again
 ```
@@ -49,30 +146,80 @@ Copy-Item .env.example .env      # then change POSTGRES_PASSWORD in .env
 ```bash
 git clone https://github.com/Aditya-7826/ledger-service.git
 cd ledger-service
-cp .env.example .env             # then change POSTGRES_PASSWORD in .env
-./scripts/dev.sh up              # start Postgres + Redpanda, wait until healthy
+cp .env.example .env             # then change POSTGRES_PASSWORD in .env (both places)
+./scripts/dev.sh up              # build the API, start everything, wait until healthy
+./scripts/dev.sh test            # run the Go tests (needs Docker running)
 ./scripts/dev.sh down            # stop (data is kept)
 ./scripts/dev.sh reset           # stop, delete data, start again
 ```
 
-The `test`, `seed` and `loadtest` subcommands exist in both scripts; `seed` and `loadtest` report that they are not built yet until Phase 5.
+`seed` and `loadtest` exist in both scripts but report that they are not built yet (Phase 5).
+
+### Try it
+
+**PowerShell**
+
+```powershell
+$api = "http://localhost:8080"
+$asha = Invoke-RestMethod -Method Post "$api/v1/accounts" -ContentType "application/json" -Body '{"name":"Asha","currency":"INR"}'
+$ravi = Invoke-RestMethod -Method Post "$api/v1/accounts" -ContentType "application/json" -Body '{"name":"Ravi","currency":"INR"}'
+$h = @{ "Idempotency-Key" = "deposit-1"; "X-Client-Id" = "demo" }
+Invoke-RestMethod -Method Post "$api/v1/deposits" -Headers $h -ContentType "application/json" -Body (@{ account_id = $asha.id; amount_minor = 50000; currency = "INR" } | ConvertTo-Json)
+
+$h = @{ "Idempotency-Key" = "transfer-1"; "X-Client-Id" = "demo" }
+$body = @{ from_account_id = $asha.id; to_account_id = $ravi.id; amount_minor = 12550; currency = "INR"; memo = "lunch" } | ConvertTo-Json
+Invoke-WebRequest -Method Post "$api/v1/transfers" -Headers $h -ContentType "application/json" -Body $body -UseBasicParsing | Select-Object StatusCode, Headers
+# Run the last line again: same response, plus the header Idempotent-Replayed: true, and no second charge.
+Invoke-RestMethod "$api/v1/reconcile"
+```
+
+**bash**
+
+```bash
+api=http://localhost:8080
+asha=$(curl -s -H 'Content-Type: application/json' -d '{"name":"Asha","currency":"INR"}' $api/v1/accounts | sed 's/.*"id":"\([^"]*\)".*/\1/')
+ravi=$(curl -s -H 'Content-Type: application/json' -d '{"name":"Ravi","currency":"INR"}' $api/v1/accounts | sed 's/.*"id":"\([^"]*\)".*/\1/')
+curl -s -H 'Content-Type: application/json' -H 'Idempotency-Key: deposit-1' -H 'X-Client-Id: demo' \
+  -d "{\"account_id\":\"$asha\",\"amount_minor\":50000,\"currency\":\"INR\"}" $api/v1/deposits
+
+curl -si -H 'Content-Type: application/json' -H 'Idempotency-Key: transfer-1' -H 'X-Client-Id: demo' \
+  -d "{\"from_account_id\":\"$asha\",\"to_account_id\":\"$ravi\",\"amount_minor\":12550,\"currency\":\"INR\",\"memo\":\"lunch\"}" $api/v1/transfers
+# Run the last command again: same response, plus the header Idempotent-Replayed: true, and no second charge.
+curl -s $api/v1/reconcile
+```
+
+## Tests
+
+The tests run the real HTTP API against a real PostgreSQL 16 started by testcontainers-go (one container for the whole package; packages run one at a time with `-p 1`).
+
+| Test | What it proves |
+|---|---|
+| Concurrency invariant | 50 goroutines make random transfers among 20 accounts for 15 s; afterwards reconcile passes, no balance is below zero and no money appeared or vanished |
+| Deadlock | 2,000 opposing A→B / B→A transfers from 8 workers; every one succeeds |
+| Idempotency | a replay is byte-identical and carries the replay header; a different body gets 422; 20 concurrent identical requests create exactly 1 transfer; a key rejected for insufficient funds succeeds on retry after a deposit; expired keys are cleaned up and count as new |
+| Freeze race | once the freeze call has returned, no entry is written to the account and every later transfer gets 403 |
+| Reversals | once works; twice is refused; a reversal of a reversal is refused; a receiver without funds gets 409 |
+| Append-only | the trigger rejects UPDATE, DELETE and TRUNCATE on `entries` |
+| Validation table | 29 bad requests (zero, negative, float, string, overflow, self-transfer, currency mismatch, unknown or closed account, long memo, malformed UUID, missing headers, oversized body, unknown field, …) each get the right status and code, create no transfer and leave no key behind |
+| Reconcile | a tampered balance is detected |
+| Retry | deadlocks and serialization failures are retried at most 3 times; other errors never |
 
 ## Project structure
 
 ```
-cmd/                 one folder per service: api, outbox-relay, consumer-notify, consumer-balances
-internal/            ledger, idempotency, outbox, events, httpapi, store, config
+cmd/api/             the HTTP API binary
+cmd/                 outbox-relay, consumer-notify, consumer-balances (later phases)
+internal/config/     environment configuration
+internal/store/      connection pool, migrations, retrying transaction helper
+internal/idempotency/  idempotency keys in PostgreSQL, cleanup job
+internal/ledger/     accounts, transfers, deposits, reversals, reconciliation
+internal/httpapi/    routes, strict JSON decoding, problem+json errors, tests
 migrations/          SQL migrations (goose)
-web/                 dashboard
-loadtest/            k6 scenarios
 scripts/             dev.ps1 and dev.sh
-docs/                diagrams and screenshots
-results/             load-test result files
-.github/workflows/   CI
+web/ loadtest/ docs/ results/   empty until their phase is built
+Dockerfile           one image for every Go service
 docker-compose.yml
 ```
-
-Most of these folders are empty until their phase is built.
 
 ## Licence
 
