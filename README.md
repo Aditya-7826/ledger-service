@@ -37,7 +37,7 @@
 | 3 | Consumers: balance read model, notifications over SSE, dead-letter topics | Done |
 | 4 | Web dashboard (React + Vite + TypeScript + Tailwind) | Done |
 | 5 | Seed data and k6 load tests | Done |
-| 6 | CI and final documentation | In progress |
+| 6 | CI and final documentation | Done |
 
 ## Why we built this
 

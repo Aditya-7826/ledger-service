@@ -17,6 +17,7 @@ const arg = (name, fallback) => {
 }
 const base = arg('base', 'http://localhost:8088')
 const outDir = path.resolve(arg('out', path.join(root, 'docs', 'screenshots')))
+const only = arg('only', '') // capture just this page, e.g. --only system
 const port = 9333
 
 const candidates = [
@@ -55,7 +56,7 @@ const pages = [
   { name: 'journal', path: '/journal', width: 1280, height: 1000 },
   { name: 'system', path: '/system', width: 1280, height: 1000 },
   { name: 'mobile-dashboard', path: '/', width: 375, height: 1400, mobile: true },
-]
+].filter((p) => !only || p.name === only)
 
 fs.mkdirSync(outDir, { recursive: true })
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-shots-'))
@@ -104,7 +105,7 @@ try {
       width: p.width, height: p.height, deviceScaleFactor: p.mobile ? 2 : 1, mobile: Boolean(p.mobile),
     })
     await send('Page.navigate', { url: base + p.path })
-    await sleep(4500) // let data load and the live feed connect
+    await sleep(Number(arg('wait', '4500'))) // let data load and the live feed connect
     const shot = await send('Page.captureScreenshot', { format: 'png' })
     const file = path.join(outDir, `${p.name}.png`)
     fs.writeFileSync(file, Buffer.from(shot.data, 'base64'))
@@ -114,5 +115,9 @@ try {
 } finally {
   child.kill()
   await sleep(500)
-  fs.rmSync(profile, { recursive: true, force: true })
+  try {
+    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 })
+  } catch {
+    // The browser can hold files for a moment after exiting; the OS cleans its temp folder later.
+  }
 }

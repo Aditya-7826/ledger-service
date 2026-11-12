@@ -107,7 +107,7 @@ export default function System() {
                 <thead className="text-xs uppercase tracking-wide text-ink-soft">
                   <tr>
                     <th scope="col" className="py-2 pr-3 font-semibold">Scenario</th>
-                    <th scope="col" className="py-2 pr-3 text-right font-semibold">Requests/s</th>
+                    <th scope="col" className="py-2 pr-3 text-right font-semibold">Transfers/s</th>
                     <th scope="col" className="py-2 pr-3 text-right font-semibold">p50</th>
                     <th scope="col" className="py-2 pr-3 text-right font-semibold">p95</th>
                     <th scope="col" className="py-2 pr-3 text-right font-semibold">p99</th>
