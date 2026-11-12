@@ -105,16 +105,9 @@ func (r *Runner) Run(ctx context.Context) {
 		fetches.EachError(func(topic string, partition int32, err error) {
 			r.Log.Warn("fetch error", "topic", topic, "partition", partition, "error", err)
 		})
-		var done []*kgo.Record
-		fetches.EachRecord(func(rec *kgo.Record) {
-			if ctx.Err() != nil {
-				return
-			}
-			if err := r.process(ctx, rec); err != nil {
-				return // only when ctx was cancelled mid-record
-			}
-			done = append(done, rec)
-		})
+		var recs []*kgo.Record
+		fetches.EachRecord(func(rec *kgo.Record) { recs = append(recs, rec) })
+		done := r.processAll(ctx, recs)
 		if len(done) == 0 {
 			continue
 		}
@@ -125,6 +118,84 @@ func (r *Runner) Run(ctx context.Context) {
 			r.Log.Warn("offset commit failed; records will be redelivered", "error", err)
 		}
 	}
+}
+
+// BatchSize is the most records applied in one database transaction.
+const BatchSize = 500
+
+// processAll handles the records of one fetch, in order, and returns the
+// prefix that is finished (applied, skipped or dead-lettered).
+//
+// Records are applied in batches of up to BatchSize per transaction: one
+// commit (and one disk sync) per batch instead of per event. Each record
+// still gets its own dedupe insert, so the outcome is the same as one by
+// one. If anything in a batch fails (a poison message, a sequence gap, a
+// database error), the batch is rolled back and its records are processed
+// one at a time with the usual retries and dead-lettering.
+func (r *Runner) processAll(ctx context.Context, recs []*kgo.Record) []*kgo.Record {
+	done := make([]*kgo.Record, 0, len(recs))
+	for start := 0; start < len(recs); start += BatchSize {
+		if ctx.Err() != nil {
+			return done
+		}
+		chunk := recs[start:min(start+BatchSize, len(recs))]
+		if r.applyBatch(ctx, chunk) {
+			done = append(done, chunk...)
+			continue
+		}
+		for _, rec := range chunk {
+			if err := r.process(ctx, rec); err != nil {
+				return done // only when ctx was cancelled mid-record
+			}
+			done = append(done, rec)
+		}
+	}
+	return done
+}
+
+// applyBatch applies every record in one transaction and reports whether it
+// committed. It changes nothing (and returns false) if any record fails.
+func (r *Runner) applyBatch(ctx context.Context, recs []*kgo.Record) bool {
+	headers := make([]events.Header, len(recs))
+	for i, rec := range recs {
+		h, err := r.parse(rec)
+		if err != nil {
+			return false
+		}
+		headers[i] = h
+	}
+	var applied []events.Header
+	var duplicates int64
+	err := pgx.BeginFunc(ctx, r.Pool, func(tx pgx.Tx) error {
+		applied, duplicates = applied[:0], 0
+		for i, rec := range recs {
+			tag, err := tx.Exec(ctx, `INSERT INTO views.processed_events (consumer, event_id) VALUES ($1, $2)
+				ON CONFLICT DO NOTHING`, r.Name, headers[i].EventID)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() == 0 {
+				duplicates++ // also catches the same event twice inside this batch
+				continue
+			}
+			if err := r.Handler.Handle(ctx, tx, headers[i], rec); err != nil {
+				return err
+			}
+			applied = append(applied, headers[i])
+		}
+		return nil
+	})
+	if err != nil {
+		return false
+	}
+	r.Stats.Applied.Add(int64(len(applied)))
+	r.Stats.Duplicates.Add(duplicates)
+	if r.OnCommitted != nil {
+		for _, h := range applied {
+			r.OnCommitted(h)
+		}
+	}
+	return true
 }
 
 // process handles one record until it is applied, skipped or dead-lettered.

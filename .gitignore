@@ -26,3 +26,6 @@ web/coverage/
 tmp/
 .DS_Store
 Thumbs.db
+
+# load test working files
+loadtest/accounts.json

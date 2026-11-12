@@ -1,6 +1,9 @@
 # Developer commands for Windows PowerShell. Same subcommands as scripts/dev.sh.
 #   .\scripts\dev.ps1 up | down | test | seed | loadtest | reset
-param([Parameter(Position = 0)][string]$Command = "help")
+param(
+    [Parameter(Position = 0)][string]$Command = "help",
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest
+)
 
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
@@ -34,20 +37,22 @@ switch ($Command) {
         exit $LASTEXITCODE
     }
     "seed" {
-        Write-Host "seed is not built yet (Phase 5). See 'Project status' in the README."
-        exit 1
+        # Creates 1,000 funded accounts through the API and writes loadtest/accounts.json.
+        go run ./cmd/seed @Rest
+        exit $LASTEXITCODE
     }
     "loadtest" {
-        Write-Host "loadtest is not built yet (Phase 5). See 'Project status' in the README."
-        exit 1
+        # Runs the k6 scenarios and writes results/loadtest-<scenario>.json. Needs k6 and a seeded stack.
+        go run ./cmd/loadtest @Rest
+        exit $LASTEXITCODE
     }
     default {
         Write-Host "usage: .\scripts\dev.ps1 <up|down|test|seed|loadtest|reset>"
         Write-Host "  up        start Postgres and Redpanda and wait until healthy"
         Write-Host "  down      stop the stack (data is kept)"
         Write-Host "  test      run the Go tests"
-        Write-Host "  seed      create demo accounts (Phase 5)"
-        Write-Host "  loadtest  run the k6 scenarios (Phase 5)"
+        Write-Host "  seed      create 1,000 funded demo accounts (the stack must be up)"
+        Write-Host "  loadtest  run the k6 load test and write results/*.json (after seed)"
         Write-Host "  reset     stop the stack, delete its data, start again"
         if ($Command -ne "help") { exit 1 }
     }

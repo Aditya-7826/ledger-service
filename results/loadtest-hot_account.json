@@ -1,0 +1,35 @@
+{
+  "scenario": "hot_account",
+  "description": "80% of transfers credit one merchant account (row-lock contention)",
+  "ran_at": "2026-11-12T16:31:28.3938008Z",
+  "virtual_users": 50,
+  "duration_seconds": 120.4,
+  "requests": 16205,
+  "requests_per_second": 134.6,
+  "transfers_created": 16205,
+  "throughput_per_second": 134.6,
+  "latency_ms": {
+    "p50": 375.35,
+    "p95": 520.4,
+    "p99": 708.85
+  },
+  "error_rate": 0,
+  "replays": 0,
+  "mismatches": 0,
+  "reconcile_ok": true,
+  "pipeline_drain_seconds": 0,
+  "pipeline_drained": true,
+  "duplicates": 0,
+  "hardware": {
+    "container_memory_limits": "api 256 MB, postgres 512 MB, redpanda 1 GB, relay 256 MB, each consumer 256 MB",
+    "cpu": "AMD Ryzen 5 5600H with Radeon Graphics",
+    "docker_memory_gb": 3.8,
+    "docker_version": "29.9.2",
+    "k6_version": "k6.exe v2.3.0",
+    "load_generator": "k6 on the same machine as the stack",
+    "logical_cpus": 12,
+    "os": "windows/amd64",
+    "os_version": "Microsoft Windows 11 Home Single Language",
+    "ram_gb": "7.3"
+  }
+}

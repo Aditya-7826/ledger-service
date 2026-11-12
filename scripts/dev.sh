@@ -30,20 +30,22 @@ case "${1:-help}" in
     docker compose up -d --wait --build
     ;;
   seed)
-    echo "seed is not built yet (Phase 5). See 'Project status' in the README."
-    exit 1
+    # Creates 1,000 funded accounts through the API and writes loadtest/accounts.json.
+    shift
+    go run ./cmd/seed "$@"
     ;;
   loadtest)
-    echo "loadtest is not built yet (Phase 5). See 'Project status' in the README."
-    exit 1
+    # Runs the k6 scenarios and writes results/loadtest-<scenario>.json. Needs k6 and a seeded stack.
+    shift
+    go run ./cmd/loadtest "$@"
     ;;
   *)
     echo "usage: ./scripts/dev.sh <up|down|test|seed|loadtest|reset>"
     echo "  up        start Postgres and Redpanda and wait until healthy"
     echo "  down      stop the stack (data is kept)"
     echo "  test      run the Go tests"
-    echo "  seed      create demo accounts (Phase 5)"
-    echo "  loadtest  run the k6 scenarios (Phase 5)"
+    echo "  seed      create 1,000 funded demo accounts (the stack must be up)"
+    echo "  loadtest  run the k6 load test and write results/*.json (after seed)"
     echo "  reset     stop the stack, delete its data, start again"
     [ "${1:-help}" = "help" ] || exit 1
     ;;
